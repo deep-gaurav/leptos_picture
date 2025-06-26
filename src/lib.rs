@@ -21,22 +21,32 @@ pub fn Picture(
             }
         },
     );
-    Suspend::new(async move {
-        let (srcset, sizes_gen, width, height) = srcset
-            .await
-            .map(|(srcset, sizes, dim)| (Some(srcset), Some(sizes), Some(dim.0), Some(dim.1)))
-            .unwrap_or((None, None, None, None));
-        view! {
-            <img
-                src={src}
-                srcset={srcset}
-                sizes={sizes.or(sizes_gen)}
-                height={height}
-                width={width}
-                alt={alt}
-            />
-        }
-    })
+    let src = StoredValue::new(src);
+    let alt = StoredValue::new(alt);
+    let sizes = StoredValue::new(sizes);
+
+    view! {
+        <Suspense>
+            {
+                move || Suspend::new(async move {
+                    let (srcset, sizes_gen, width, height) = srcset
+                        .await
+                        .map(|(srcset, sizes, dim)| (Some(srcset), Some(sizes), Some(dim.0), Some(dim.1)))
+                        .unwrap_or((None, None, None, None));
+                    view! {
+                        <img
+                            src = src.get_value()
+                            alt = alt.get_value()
+                            srcset={srcset}
+                            sizes={sizes.get_value().or(sizes_gen)}
+                            height={height}
+                            width={width}
+                        />
+                    }
+                })
+            }
+        </Suspense>
+    }
 }
 
 #[cfg(feature = "ssr")]
@@ -82,7 +92,15 @@ pub mod ssr {
         };
         let dir = path.parent()?;
         println!("Generate hash");
-        let img_hash = generate_file_hash(&path).await.ok()?;
+        let image_hash_result = generate_file_hash(&path).await;
+       
+        let img_hash = match image_hash_result {
+            Ok(hash) => hash,
+            Err(err) => {
+                println!("Error generating file hash: {err}");
+                return None;
+            }
+        };
         println!("Got hash {img_hash}");
         let cache_dir = variantlock
             .cache_folder_path
@@ -114,15 +132,17 @@ pub mod ssr {
             let path = dir.join(&name);
             let cache_path = cache_dir.join(&name);
 
-            if let Ok(mut variants) = variantlock.paths.lock() {
-                if variants.contains(&path) {
-                    avif_sizes.push((*size, path));
-                    continue;
+            {
+                if let Ok(mut variants) = variantlock.paths.lock() {
+                    if variants.contains(&path) {
+                        avif_sizes.push((*size, path));
+                        continue;
+                    } else {
+                        variants.insert(path.clone());
+                    }
                 } else {
-                    variants.insert(path.clone());
+                    continue;
                 }
-            } else {
-                continue;
             }
             if Some(true) == tokio::fs::try_exists(&cache_path).await.ok()
                 && tokio::fs::copy(&cache_path, &path).await.is_ok()
@@ -187,7 +207,18 @@ pub mod ssr {
     }
 
     async fn generate_file_hash(file_path: &Path) -> std::io::Result<String> {
-        let file = tokio::fs::File::open(file_path).await?;
+        println!("Generating file hash for {file_path:?}");
+        println!("Opening file {file_path:?}");
+        let file = std::fs::File::open(file_path);
+        let file = match file {
+            Ok(file) => file,
+            Err(err) => {
+                println!("Error opening file {file_path:?}: {err}");
+                return Err(err);
+            }
+        };
+        println!("Opened file {file_path:?}");
+        let file = tokio::fs::File::from_std(file);
         let mut reader = BufReader::new(file);
         let mut hasher = Sha256::new();
 
