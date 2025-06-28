@@ -53,35 +53,43 @@ pub fn Picture(
 pub mod ssr {
 
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
 
-    use image::{imageops::FilterType::Lanczos3, ImageReader};
+    use image::{ImageReader, imageops::FilterType::Lanczos3};
     use leptos::{config::LeptosOptions, prelude::expect_context};
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, BufReader};
 
     #[derive(Clone)]
     pub struct VariantLock {
-        paths: Arc<Mutex<HashSet<PathBuf>>>,
+        paths: Arc<Mutex<HashMap<PathBuf, (u32, u32, HashSet<(u32, PathBuf)>)>>>,
+        generation_lock: Arc<tokio::sync::Mutex<()>>,
         pub cache_folder_path: PathBuf,
     }
 
     impl VariantLock {
         pub fn new(cache_folder: PathBuf) -> VariantLock {
             Self {
-                paths: Arc::new(Mutex::new(HashSet::new())),
+                paths: Arc::new(Mutex::new(HashMap::new())),
                 cache_folder_path: cache_folder,
+                generation_lock: Arc::new(tokio::sync::Mutex::new(()))
             }
         }
     }
 
     pub async fn make_variants(url: &str) -> Option<(String, String, (u32, u32))> {
         println!("Make variants for {url}");
+        let mut avif_sizes = vec![];
+
         let options = expect_context::<LeptosOptions>();
         let variantlock = expect_context::<VariantLock>();
+        println!("Locking generation for {url}");
+        let generation_lock = variantlock.generation_lock.lock().await;
+        println!("Got lock for generation for {url}");
+
         let path = PathBuf::from(options.site_root.as_ref()).join(url.strip_prefix("/")?);
         let name = if let Some(extension) = path.extension() {
             path.file_name()?
@@ -92,91 +100,118 @@ pub mod ssr {
         };
         let dir = path.parent()?;
         println!("Generate hash");
-        let image_hash_result = generate_file_hash(&path).await;
-       
-        let img_hash = match image_hash_result {
-            Ok(hash) => hash,
-            Err(err) => {
-                println!("Error generating file hash: {err}");
-                return None;
-            }
-        };
-        println!("Got hash {img_hash}");
-        let cache_dir = variantlock
-            .cache_folder_path
-            .join(format!("{name}-{img_hash}"));
-        tokio::fs::create_dir_all(&cache_dir).await.ok()?;
+        let original_path = path.clone();
 
-        let image = ImageReader::open(&path).ok()?.decode().ok()?;
-        let width = image.width();
-        let height = image.height();
-        let mut sizes = vec![240, 320, 480, 720, 960, 1080, 1440, 1620, 1920];
-        sizes.retain(|size| size < &width);
-
-        if width > sizes.last().cloned().unwrap_or_default() {
-            sizes.push(width);
-        }
-
-        let mut avif_sizes = vec![];
-        for size in sizes.iter() {
-            let (ext, format);
-            #[cfg(debug_assertions)]
-            {
-                (ext, format) = ("png", image::ImageFormat::Png);
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                (ext, format) = ("avif", image::ImageFormat::Avif);
-            }
-            let name = format!("{name}-{size}.{ext}");
-            let path = dir.join(&name);
-            let cache_path = cache_dir.join(&name);
-
-            {
-                if let Ok(mut variants) = variantlock.paths.lock() {
-                    if variants.contains(&path) {
-                        avif_sizes.push((*size, path));
-                        continue;
-                    } else {
-                        variants.insert(path.clone());
+        let mut width = 0;
+        let mut height = 0;
+        let mut needed_gen = true;
+        {
+            if let Ok(mut variants) = variantlock.paths.lock() {
+                if let Some((image_width, image_height, variants_gen)) = variants.get_mut(&original_path) {
+                    width = *image_width;
+                    height = *image_height;
+                    for (size, path) in variants_gen.iter() {
+                        avif_sizes.push((*size, path.clone()));
                     }
-                } else {
+                    needed_gen = false;
+                }
+            }
+        }
+        if needed_gen {
+            let image_hash_result = generate_file_hash(&path).await;
+
+            let img_hash = match image_hash_result {
+                Ok(hash) => hash,
+                Err(err) => {
+                    println!("Error generating file hash: {err}");
+                    return None;
+                }
+            };
+            println!("Got hash {img_hash}");
+            let cache_dir = variantlock
+                .cache_folder_path
+                .join(format!("{name}-{img_hash}"));
+            tokio::fs::create_dir_all(&cache_dir).await.ok()?;
+
+            let image = ImageReader::open(&path).ok()?.decode().ok()?;
+            width = image.width();
+            height = image.height();
+            let mut sizes = vec![240, 320, 480, 720, 960, 1080, 1440, 1620, 1920];
+            sizes.retain(|size| size < &width);
+
+            if width > sizes.last().cloned().unwrap_or_default() {
+                sizes.push(width);
+            }
+
+            for size in sizes.iter() {
+                let (ext, format);
+                #[cfg(debug_assertions)]
+                {
+                    (ext, format) = ("png", image::ImageFormat::Png);
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    (ext, format) = ("avif", image::ImageFormat::Avif);
+                }
+                let name = format!("{name}-{size}.{ext}");
+                let path = dir.join(&name);
+                let cache_path = cache_dir.join(&name);
+
+                {
+                    if let Ok(mut variants) = variantlock.paths.lock() {
+                        if let Some((width, height, variants_gen)) =
+                            variants.get_mut(&original_path)
+                        {
+                            if variants_gen.contains(&(*size, path.clone())) {
+                                avif_sizes.push((*size, path.clone()));
+                                continue;
+                            } else {
+                                variants_gen.insert((*size, path.clone()));
+                            }
+                        } else {
+                            let mut variants_gen = HashSet::new();
+                            variants_gen.insert((*size, path.clone()));
+                            variants.insert(original_path.clone(), (width, height, variants_gen));
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                if Some(true) == tokio::fs::try_exists(&cache_path).await.ok()
+                    && tokio::fs::copy(&cache_path, &path).await.is_ok()
+                {
+                    avif_sizes.push((*size, path));
                     continue;
                 }
-            }
-            if Some(true) == tokio::fs::try_exists(&cache_path).await.ok()
-                && tokio::fs::copy(&cache_path, &path).await.is_ok()
-            {
-                avif_sizes.push((*size, path));
-                continue;
-            }
 
-            let img = image.clone();
+                let img = image.clone();
 
-            let new_h = ((*size as f64) / (width as f64)) * (height as f64);
-            let new_img = img.resize_exact(*size, new_h as u32, Lanczos3);
+                let new_h = ((*size as f64) / (width as f64)) * (height as f64);
+                let new_img = img.resize_exact(*size, new_h as u32, Lanczos3);
 
-            if let Ok(exists) = tokio::fs::try_exists(&path).await {
-                let p2 = path.clone();
-                if exists {
-                    println!("Skip bcz exists {path:?}");
-                    avif_sizes.push((*size, path));
-                } else if let Ok(data) = tokio::task::spawn_blocking(move || async move {
-                    new_img.save_with_format(&path, format)
-                })
-                .await
-                {
-                    println!("writing to New w: {size} h {new_h} {p2:?}");
-                    if data.await.is_ok() {
-                        println!("written to New w: {size} h {new_h} {p2:?}");
-                        let _ = tokio::fs::copy(&p2, &cache_path).await;
-                        avif_sizes.push((*size, p2));
+                if let Ok(exists) = tokio::fs::try_exists(&path).await {
+                    let p2 = path.clone();
+                    if exists {
+                        println!("Skip bcz exists {path:?}");
+                        avif_sizes.push((*size, path));
+                    } else if let Ok(data) = tokio::task::spawn_blocking(move || async move {
+                        new_img.save_with_format(&path, format)
+                    })
+                    .await
+                    {
+                        println!("writing to New w: {size} h {new_h} {p2:?}");
+                        if data.await.is_ok() {
+                            println!("written to New w: {size} h {new_h} {p2:?}");
+                            let _ = tokio::fs::copy(&p2, &cache_path).await;
+                            avif_sizes.push((*size, p2));
+                        }
                     }
+                } else {
+                    println!("Skip bcz error {path:?}");
                 }
-            } else {
-                println!("Skip bcz error {path:?}");
             }
         }
+
         avif_sizes.sort_by(|a, b| a.0.cmp(&b.0));
         let srcs = avif_sizes
             .iter()
@@ -203,6 +238,8 @@ pub mod ssr {
             .collect::<Vec<_>>()
             .join(", ");
 
+        println!("Variants generated for {original_path:?}");
+        drop(generation_lock);
         Some((srcs, sizes_st, (width, height)))
     }
 
