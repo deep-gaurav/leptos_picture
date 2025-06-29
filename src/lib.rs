@@ -10,17 +10,9 @@ pub fn Picture(
     let srcc = src.clone();
     let srcset = Resource::new_blocking(
         move || srcc.clone(),
-        |src| async move {
-            #[cfg(feature = "ssr")]
-            {
-                ssr::make_variants(&src).await
-            }
-            #[cfg(not(feature = "ssr"))]
-            {
-                Option::<(String, String, (u32, u32))>::None
-            }
-        },
+        |src| async move { make_variants(src).await },
     );
+
     let src = StoredValue::new(src);
     let alt = StoredValue::new(alt);
     let sizes = StoredValue::new(sizes);
@@ -31,6 +23,7 @@ pub fn Picture(
                 move || Suspend::new(async move {
                     let (srcset, sizes_gen, width, height) = srcset
                         .await
+                        .unwrap()
                         .map(|(srcset, sizes, dim)| (Some(srcset), Some(sizes), Some(dim.0), Some(dim.1)))
                         .unwrap_or((None, None, None, None));
                     view! {
@@ -59,14 +52,18 @@ pub mod ssr {
     };
 
     use image::{ImageReader, imageops::FilterType::Lanczos3};
-    use leptos::{config::LeptosOptions, prelude::expect_context};
+    use leptos::{
+        config::LeptosOptions,
+        prelude::{ServerFnError, expect_context},
+        server,
+    };
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, BufReader};
 
     #[derive(Clone)]
     pub struct VariantLock {
-        paths: Arc<Mutex<HashMap<PathBuf, (u32, u32, HashSet<(u32, PathBuf)>)>>>,
-        generation_lock: Arc<tokio::sync::Mutex<()>>,
+        pub paths: Arc<Mutex<HashMap<PathBuf, (u32, u32, HashSet<(u32, PathBuf)>)>>>,
+        pub generation_lock: Arc<tokio::sync::Mutex<()>>,
         pub cache_folder_path: PathBuf,
     }
 
@@ -75,17 +72,48 @@ pub mod ssr {
             Self {
                 paths: Arc::new(Mutex::new(HashMap::new())),
                 cache_folder_path: cache_folder,
-                generation_lock: Arc::new(tokio::sync::Mutex::new(()))
+                generation_lock: Arc::new(tokio::sync::Mutex::new(())),
             }
         }
     }
 
-    pub async fn make_variants(url: &str) -> Option<(String, String, (u32, u32))> {
+    async fn generate_file_hash(file_path: &Path) -> std::io::Result<String> {
+        println!("Generating file hash for {file_path:?}");
+        println!("Opening file {file_path:?}");
+        let file = std::fs::File::open(file_path);
+        let file = match file {
+            Ok(file) => file,
+            Err(err) => {
+                println!("Error opening file {file_path:?}: {err}");
+                return Err(err);
+            }
+        };
+        println!("Opened file {file_path:?}");
+        let file = tokio::fs::File::from_std(file);
+        let mut reader = BufReader::new(file);
+        let mut hasher = Sha256::new();
+
+        let mut buffer = [0; 1024]; // 1MB buffer
+        loop {
+            let count = reader.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+
+        let hash = hasher.finalize();
+        Ok(hex::encode(hash))
+    }
+
+    pub async fn make_variants(
+        url: String,
+        variantlock: VariantLock,
+        options: LeptosOptions,
+    ) -> Option<(String, String, (u32, u32))> {
         println!("Make variants for {url}");
         let mut avif_sizes = vec![];
 
-        let options = expect_context::<LeptosOptions>();
-        let variantlock = expect_context::<VariantLock>();
         println!("Locking generation for {url}");
         let generation_lock = variantlock.generation_lock.lock().await;
         println!("Got lock for generation for {url}");
@@ -107,7 +135,9 @@ pub mod ssr {
         let mut needed_gen = true;
         {
             if let Ok(mut variants) = variantlock.paths.lock() {
-                if let Some((image_width, image_height, variants_gen)) = variants.get_mut(&original_path) {
+                if let Some((image_width, image_height, variants_gen)) =
+                    variants.get_mut(&original_path)
+                {
                     width = *image_width;
                     height = *image_height;
                     for (size, path) in variants_gen.iter() {
@@ -242,33 +272,14 @@ pub mod ssr {
         drop(generation_lock);
         Some((srcs, sizes_st, (width, height)))
     }
+}
 
-    async fn generate_file_hash(file_path: &Path) -> std::io::Result<String> {
-        println!("Generating file hash for {file_path:?}");
-        println!("Opening file {file_path:?}");
-        let file = std::fs::File::open(file_path);
-        let file = match file {
-            Ok(file) => file,
-            Err(err) => {
-                println!("Error opening file {file_path:?}: {err}");
-                return Err(err);
-            }
-        };
-        println!("Opened file {file_path:?}");
-        let file = tokio::fs::File::from_std(file);
-        let mut reader = BufReader::new(file);
-        let mut hasher = Sha256::new();
-
-        let mut buffer = [0; 1024]; // 1MB buffer
-        loop {
-            let count = reader.read(&mut buffer).await?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-        }
-
-        let hash = hasher.finalize();
-        Ok(hex::encode(hash))
-    }
+#[server]
+pub async fn make_variants(
+    url: String,
+) -> Result<Option<(String, String, (u32, u32))>, ServerFnError> {
+    let options = expect_context::<LeptosOptions>();
+    let variantlock = expect_context::<ssr::VariantLock>();
+    Ok(ssr::make_variants(url, variantlock, options)
+        .await)
 }
