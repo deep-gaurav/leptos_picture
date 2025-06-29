@@ -278,8 +278,13 @@ pub mod ssr {
 pub async fn make_variants(
     url: String,
 ) -> Result<Option<(String, String, (u32, u32))>, ServerFnError> {
-    let options = expect_context::<LeptosOptions>();
-    let variantlock = expect_context::<ssr::VariantLock>();
-    Ok(ssr::make_variants(url, variantlock, options)
-        .await)
+    #[cfg(feature = "ssr")]
+    {
+        let options = expect_context::<LeptosOptions>();
+        let variantlock = expect_context::<ssr::VariantLock>();
+        Ok(ssr::make_variants(url, variantlock, options)
+            .await)
+    }
+    #[cfg(not(feature = "ssr"))]
+    Ok(None)
 }
