@@ -60,6 +60,7 @@ pub mod ssr {
 
     use image::{ImageReader, imageops::FilterType::Lanczos3};
     use leptos::{config::LeptosOptions, prelude::expect_context};
+    use rayon::prelude::*;
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, BufReader};
 
@@ -75,7 +76,7 @@ pub mod ssr {
             Self {
                 paths: Arc::new(Mutex::new(HashMap::new())),
                 cache_folder_path: cache_folder,
-                generation_lock: Arc::new(tokio::sync::Mutex::new(()))
+                generation_lock: Arc::new(tokio::sync::Mutex::new(())),
             }
         }
     }
@@ -107,7 +108,9 @@ pub mod ssr {
         let mut needed_gen = true;
         {
             if let Ok(mut variants) = variantlock.paths.lock() {
-                if let Some((image_width, image_height, variants_gen)) = variants.get_mut(&original_path) {
+                if let Some((image_width, image_height, variants_gen)) =
+                    variants.get_mut(&original_path)
+                {
                     width = *image_width;
                     height = *image_height;
                     for (size, path) in variants_gen.iter() {
@@ -133,83 +136,95 @@ pub mod ssr {
                 .join(format!("{name}-{img_hash}"));
             tokio::fs::create_dir_all(&cache_dir).await.ok()?;
 
-            let image = ImageReader::open(&path).ok()?.decode().ok()?;
-            width = image.width();
-            height = image.height();
-            let mut sizes = vec![240, 320, 480, 720, 960, 1080, 1440, 1620, 1920];
-            sizes.retain(|size| size < &width);
+            let path = path.clone();
+            let dir = dir.to_path_buf();
+            let name = name.to_string();
+            let paths = variantlock.paths.clone();
+            let original_path = original_path.clone();
+            let cache_dir = cache_dir.clone();
 
-            if width > sizes.last().cloned().unwrap_or_default() {
-                sizes.push(width);
-            }
+            let (w, h, generated) = tokio::task::spawn_blocking(move || {
+                let image = ImageReader::open(&path).ok()?.decode().ok()?;
+                let width = image.width();
+                let height = image.height();
+                let mut sizes = vec![240, 320, 480, 720, 960, 1080, 1440, 1620, 1920];
+                sizes.retain(|size| size < &width);
 
-            for size in sizes.iter() {
-                let (ext, format);
-                #[cfg(debug_assertions)]
-                {
-                    (ext, format) = ("png", image::ImageFormat::Png);
+                if width > sizes.last().cloned().unwrap_or_default() {
+                    sizes.push(width);
                 }
-                #[cfg(not(debug_assertions))]
-                {
-                    (ext, format) = ("avif", image::ImageFormat::Avif);
-                }
-                let name = format!("{name}-{size}.{ext}");
-                let path = dir.join(&name);
-                let cache_path = cache_dir.join(&name);
 
-                {
-                    if let Ok(mut variants) = variantlock.paths.lock() {
-                        if let Some((width, height, variants_gen)) =
-                            variants.get_mut(&original_path)
+                let image = Arc::new(image);
+
+                let generated = sizes
+                    .par_iter()
+                    .filter_map(|size| {
+                        let (ext, format);
+                        #[cfg(debug_assertions)]
                         {
-                            if variants_gen.contains(&(*size, path.clone())) {
-                                avif_sizes.push((*size, path.clone()));
-                                continue;
+                            (ext, format) = ("png", image::ImageFormat::Png);
+                        }
+                        #[cfg(not(debug_assertions))]
+                        {
+                            (ext, format) = ("avif", image::ImageFormat::Avif);
+                        }
+                        let name = format!("{name}-{size}.{ext}");
+                        let path = dir.join(&name);
+                        let cache_path = cache_dir.join(&name);
+
+                        {
+                            if let Ok(mut variants) = paths.lock() {
+                                if let Some((_, _, variants_gen)) = variants.get_mut(&original_path)
+                                {
+                                    if variants_gen.contains(&(*size, path.clone())) {
+                                        return Some((*size, path.clone()));
+                                    } else {
+                                        variants_gen.insert((*size, path.clone()));
+                                    }
+                                } else {
+                                    let mut variants_gen = HashSet::new();
+                                    variants_gen.insert((*size, path.clone()));
+                                    variants.insert(
+                                        original_path.clone(),
+                                        (width, height, variants_gen),
+                                    );
+                                }
                             } else {
-                                variants_gen.insert((*size, path.clone()));
+                                return None;
                             }
+                        }
+
+                        if cache_path.exists() && std::fs::copy(&cache_path, &path).is_ok() {
+                            return Some((*size, path));
+                        }
+
+                        let new_h = ((*size as f64) / (width as f64)) * (height as f64);
+                        let new_img = image.resize_exact(*size, new_h as u32, Lanczos3);
+
+                        if path.exists() {
+                            println!("Skip bcz exists {path:?}");
+                            Some((*size, path))
                         } else {
-                            let mut variants_gen = HashSet::new();
-                            variants_gen.insert((*size, path.clone()));
-                            variants.insert(original_path.clone(), (width, height, variants_gen));
+                            println!("writing to New w: {size} h {new_h} {path:?}");
+                            if new_img.save_with_format(&path, format).is_ok() {
+                                println!("written to New w: {size} h {new_h} {path:?}");
+                                let _ = std::fs::copy(&path, &cache_path);
+                                Some((*size, path))
+                            } else {
+                                None
+                            }
                         }
-                    } else {
-                        continue;
-                    }
-                }
-                if Some(true) == tokio::fs::try_exists(&cache_path).await.ok()
-                    && tokio::fs::copy(&cache_path, &path).await.is_ok()
-                {
-                    avif_sizes.push((*size, path));
-                    continue;
-                }
-
-                let img = image.clone();
-
-                let new_h = ((*size as f64) / (width as f64)) * (height as f64);
-                let new_img = img.resize_exact(*size, new_h as u32, Lanczos3);
-
-                if let Ok(exists) = tokio::fs::try_exists(&path).await {
-                    let p2 = path.clone();
-                    if exists {
-                        println!("Skip bcz exists {path:?}");
-                        avif_sizes.push((*size, path));
-                    } else if let Ok(data) = tokio::task::spawn_blocking(move || async move {
-                        new_img.save_with_format(&path, format)
                     })
-                    .await
-                    {
-                        println!("writing to New w: {size} h {new_h} {p2:?}");
-                        if data.await.is_ok() {
-                            println!("written to New w: {size} h {new_h} {p2:?}");
-                            let _ = tokio::fs::copy(&p2, &cache_path).await;
-                            avif_sizes.push((*size, p2));
-                        }
-                    }
-                } else {
-                    println!("Skip bcz error {path:?}");
-                }
-            }
+                    .collect::<Vec<_>>();
+
+                Some((width, height, generated))
+            })
+            .await
+            .ok()??;
+
+            width = w;
+            height = h;
+            avif_sizes.extend(generated);
         }
 
         avif_sizes.sort_by(|a, b| a.0.cmp(&b.0));
