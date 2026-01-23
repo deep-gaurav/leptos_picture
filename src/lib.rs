@@ -58,7 +58,7 @@ pub mod ssr {
         sync::{Arc, Mutex},
     };
 
-    use image::{ImageReader, imageops::FilterType::Lanczos3};
+    use image::{ImageReader, imageops::FilterType};
     use leptos::{config::LeptosOptions, prelude::expect_context};
     use rayon::prelude::*;
     use sha2::{Digest, Sha256};
@@ -147,7 +147,10 @@ pub mod ssr {
                 let image = ImageReader::open(&path).ok()?.decode().ok()?;
                 let width = image.width();
                 let height = image.height();
+                #[cfg(not(debug_assertions))]
                 let mut sizes = vec![240, 320, 480, 720, 960, 1080, 1440, 1620, 1920];
+                #[cfg(debug_assertions)]
+                let mut sizes = vec![720];
                 sizes.retain(|size| size < &width);
 
                 if width > sizes.last().cloned().unwrap_or_default() {
@@ -162,7 +165,7 @@ pub mod ssr {
                         let (ext, format);
                         #[cfg(debug_assertions)]
                         {
-                            (ext, format) = ("png", image::ImageFormat::Png);
+                            (ext, format) = ("jpg", image::ImageFormat::Jpeg);
                         }
                         #[cfg(not(debug_assertions))]
                         {
@@ -199,7 +202,12 @@ pub mod ssr {
                         }
 
                         let new_h = ((*size as f64) / (width as f64)) * (height as f64);
-                        let new_img = image.resize_exact(*size, new_h as u32, Lanczos3);
+                        #[cfg(debug_assertions)]
+                        let filter = FilterType::Triangle;
+                        #[cfg(not(debug_assertions))]
+                        let filter = FilterType::Lanczos3;
+
+                        let new_img = image.resize_exact(*size, new_h as u32, filter);
 
                         if path.exists() {
                             println!("Skip bcz exists {path:?}");
