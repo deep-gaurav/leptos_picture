@@ -10,10 +10,10 @@ pub fn Picture(
     let srcc = src.clone();
     let srcset = Resource::new_blocking(
         move || srcc.clone(),
-        |src| async move {
+        |_src_in| async move {
             #[cfg(feature = "ssr")]
             {
-                ssr::make_variants(&src).await
+                ssr::make_variants(&_src_in).await
             }
             #[cfg(not(feature = "ssr"))]
             {
@@ -52,18 +52,25 @@ pub fn Picture(
 #[cfg(feature = "ssr")]
 pub mod ssr {
 
+    #[cfg(not(debug_assertions))]
     use std::{
         collections::{HashMap, HashSet},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
 
+    #[cfg(not(debug_assertions))]
     use image::{ImageReader, imageops::FilterType};
+    #[cfg(not(debug_assertions))]
     use leptos::{config::LeptosOptions, prelude::expect_context};
+    #[cfg(not(debug_assertions))]
     use rayon::prelude::*;
+    #[cfg(not(debug_assertions))]
     use sha2::{Digest, Sha256};
+    #[cfg(not(debug_assertions))]
     use tokio::io::{AsyncReadExt, BufReader};
 
+    #[cfg(not(debug_assertions))]
     #[derive(Clone)]
     pub struct VariantLock {
         paths: Arc<Mutex<HashMap<PathBuf, (u32, u32, HashSet<(u32, PathBuf)>)>>>,
@@ -71,6 +78,7 @@ pub mod ssr {
         pub cache_folder_path: PathBuf,
     }
 
+    #[cfg(not(debug_assertions))]
     impl VariantLock {
         pub fn new(cache_folder: PathBuf) -> VariantLock {
             Self {
@@ -82,190 +90,186 @@ pub mod ssr {
     }
 
     pub async fn make_variants(url: &str) -> Option<(String, String, (u32, u32))> {
-        println!("Make variants for {url}");
-        let mut avif_sizes = vec![];
-
-        let options = expect_context::<LeptosOptions>();
-        let variantlock = expect_context::<VariantLock>();
-        println!("Locking generation for {url}");
-        let generation_lock = variantlock.generation_lock.lock().await;
-        println!("Got lock for generation for {url}");
-
-        let path = PathBuf::from(options.site_root.as_ref()).join(url.strip_prefix("/")?);
-        let name = if let Some(extension) = path.extension() {
-            path.file_name()?
-                .to_str()?
-                .strip_suffix(&format!(".{}", extension.to_str()?))?
-        } else {
-            path.file_name()?.to_str()?
-        };
-        let dir = path.parent()?;
-        println!("Generate hash");
-        let original_path = path.clone();
-
-        let mut width = 0;
-        let mut height = 0;
-        let mut needed_gen = true;
+        #[cfg(debug_assertions)]
         {
-            if let Ok(mut variants) = variantlock.paths.lock() {
-                if let Some((image_width, image_height, variants_gen)) =
-                    variants.get_mut(&original_path)
-                {
-                    width = *image_width;
-                    height = *image_height;
-                    for (size, path) in variants_gen.iter() {
-                        avif_sizes.push((*size, path.clone()));
+            let _ = url;
+            return None;
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            println!("Make variants for {url}");
+            let mut avif_sizes = vec![];
+
+            let options = expect_context::<LeptosOptions>();
+            let variantlock = expect_context::<VariantLock>();
+            println!("Locking generation for {url}");
+            let generation_lock = variantlock.generation_lock.lock().await;
+            println!("Got lock for generation for {url}");
+
+            let path = PathBuf::from(options.site_root.as_ref()).join(url.strip_prefix("/")?);
+            let name = if let Some(extension) = path.extension() {
+                path.file_name()?
+                    .to_str()?
+                    .strip_suffix(&format!(".{}", extension.to_str()?))?
+            } else {
+                path.file_name()?.to_str()?
+            };
+            let dir = path.parent()?;
+            println!("Generate hash");
+            let original_path = path.clone();
+
+            let mut width = 0;
+            let mut height = 0;
+            let mut needed_gen = true;
+            {
+                if let Ok(mut variants) = variantlock.paths.lock() {
+                    if let Some((image_width, image_height, variants_gen)) =
+                        variants.get_mut(&original_path)
+                    {
+                        width = *image_width;
+                        height = *image_height;
+                        for (size, path) in variants_gen.iter() {
+                            avif_sizes.push((*size, path.clone()));
+                        }
+                        needed_gen = false;
                     }
-                    needed_gen = false;
                 }
             }
-        }
-        if needed_gen {
-            let image_hash_result = generate_file_hash(&path).await;
+            if needed_gen {
+                let image_hash_result = generate_file_hash(&path).await;
 
-            let img_hash = match image_hash_result {
-                Ok(hash) => hash,
-                Err(err) => {
-                    println!("Error generating file hash: {err}");
-                    return None;
-                }
-            };
-            println!("Got hash {img_hash}");
-            let cache_dir = variantlock
-                .cache_folder_path
-                .join(format!("{name}-{img_hash}"));
-            tokio::fs::create_dir_all(&cache_dir).await.ok()?;
+                let img_hash = match image_hash_result {
+                    Ok(hash) => hash,
+                    Err(err) => {
+                        println!("Error generating file hash: {err}");
+                        return None;
+                    }
+                };
+                println!("Got hash {img_hash}");
+                let cache_dir = variantlock
+                    .cache_folder_path
+                    .join(format!("{name}-{img_hash}"));
+                tokio::fs::create_dir_all(&cache_dir).await.ok()?;
 
-            let path = path.clone();
-            let dir = dir.to_path_buf();
-            let name = name.to_string();
-            let paths = variantlock.paths.clone();
-            let original_path = original_path.clone();
-            let cache_dir = cache_dir.clone();
+                let path = path.clone();
+                let dir = dir.to_path_buf();
+                let name = name.to_string();
+                let paths = variantlock.paths.clone();
+                let original_path = original_path.clone();
+                let cache_dir = cache_dir.clone();
 
-            let (w, h, generated) = tokio::task::spawn_blocking(move || {
-                let image = ImageReader::open(&path).ok()?.decode().ok()?;
-                let width = image.width();
-                let height = image.height();
-                #[cfg(not(debug_assertions))]
-                let mut sizes = vec![240, 320, 480, 720, 960, 1080, 1440, 1620, 1920];
-                #[cfg(debug_assertions)]
-                let mut sizes = vec![720];
-                sizes.retain(|size| size < &width);
+                let (w, h, generated) = tokio::task::spawn_blocking(move || {
+                    let image = ImageReader::open(&path).ok()?.decode().ok()?;
+                    let width = image.width();
+                    let height = image.height();
+                    let mut sizes = vec![240, 320, 480, 720, 960, 1080, 1440, 1620, 1920];
+                    sizes.retain(|size| size < &width);
 
-                if width > sizes.last().cloned().unwrap_or_default() {
-                    sizes.push(width);
-                }
+                    if width > sizes.last().cloned().unwrap_or_default() {
+                        sizes.push(width);
+                    }
 
-                let image = Arc::new(image);
+                    let image = Arc::new(image);
 
-                let generated = sizes
-                    .par_iter()
-                    .filter_map(|size| {
-                        let (ext, format);
-                        #[cfg(debug_assertions)]
-                        {
-                            (ext, format) = ("jpg", image::ImageFormat::Jpeg);
-                        }
-                        #[cfg(not(debug_assertions))]
-                        {
+                    let generated = sizes
+                        .par_iter()
+                        .filter_map(|size| {
+                            let (ext, format);
                             (ext, format) = ("avif", image::ImageFormat::Avif);
-                        }
-                        let name = format!("{name}-{size}.{ext}");
-                        let path = dir.join(&name);
-                        let cache_path = cache_dir.join(&name);
+                            let name = format!("{name}-{size}.{ext}");
+                            let path = dir.join(&name);
+                            let cache_path = cache_dir.join(&name);
 
-                        {
-                            if let Ok(mut variants) = paths.lock() {
-                                if let Some((_, _, variants_gen)) = variants.get_mut(&original_path)
-                                {
-                                    if variants_gen.contains(&(*size, path.clone())) {
-                                        return Some((*size, path.clone()));
+                            {
+                                if let Ok(mut variants) = paths.lock() {
+                                    if let Some((_, _, variants_gen)) =
+                                        variants.get_mut(&original_path)
+                                    {
+                                        if variants_gen.contains(&(*size, path.clone())) {
+                                            return Some((*size, path.clone()));
+                                        } else {
+                                            variants_gen.insert((*size, path.clone()));
+                                        }
                                     } else {
+                                        let mut variants_gen = HashSet::new();
                                         variants_gen.insert((*size, path.clone()));
+                                        variants.insert(
+                                            original_path.clone(),
+                                            (width, height, variants_gen),
+                                        );
                                     }
                                 } else {
-                                    let mut variants_gen = HashSet::new();
-                                    variants_gen.insert((*size, path.clone()));
-                                    variants.insert(
-                                        original_path.clone(),
-                                        (width, height, variants_gen),
-                                    );
+                                    return None;
                                 }
-                            } else {
-                                return None;
                             }
-                        }
 
-                        if cache_path.exists() && std::fs::copy(&cache_path, &path).is_ok() {
-                            return Some((*size, path));
-                        }
+                            if cache_path.exists() && std::fs::copy(&cache_path, &path).is_ok() {
+                                return Some((*size, path));
+                            }
 
-                        let new_h = ((*size as f64) / (width as f64)) * (height as f64);
-                        #[cfg(debug_assertions)]
-                        let filter = FilterType::Triangle;
-                        #[cfg(not(debug_assertions))]
-                        let filter = FilterType::Lanczos3;
+                            let new_h = ((*size as f64) / (width as f64)) * (height as f64);
+                            let filter = FilterType::Lanczos3;
+                            let new_img = image.resize_exact(*size, new_h as u32, filter);
 
-                        let new_img = image.resize_exact(*size, new_h as u32, filter);
-
-                        if path.exists() {
-                            println!("Skip bcz exists {path:?}");
-                            Some((*size, path))
-                        } else {
-                            println!("writing to New w: {size} h {new_h} {path:?}");
-                            if new_img.save_with_format(&path, format).is_ok() {
-                                println!("written to New w: {size} h {new_h} {path:?}");
-                                let _ = std::fs::copy(&path, &cache_path);
+                            if path.exists() {
+                                println!("Skip bcz exists {path:?}");
                                 Some((*size, path))
                             } else {
-                                None
+                                println!("writing to New w: {size} h {new_h} {path:?}");
+                                if new_img.save_with_format(&path, format).is_ok() {
+                                    println!("written to New w: {size} h {new_h} {path:?}");
+                                    let _ = std::fs::copy(&path, &cache_path);
+                                    Some((*size, path))
+                                } else {
+                                    None
+                                }
                             }
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                        })
+                        .collect::<Vec<_>>();
 
-                Some((width, height, generated))
-            })
-            .await
-            .ok()??;
+                    Some((width, height, generated))
+                })
+                .await
+                .ok()??;
 
-            width = w;
-            height = h;
-            avif_sizes.extend(generated);
+                width = w;
+                height = h;
+                avif_sizes.extend(generated);
+            }
+
+            avif_sizes.sort_by(|a, b| a.0.cmp(&b.0));
+            let srcs = avif_sizes
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{} {k}w",
+                        v.to_string_lossy()
+                            .strip_prefix(options.site_root.as_ref())
+                            .expect("expected path to start in root")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let sizes_st = avif_sizes
+                .iter()
+                .map(|(w, _)| {
+                    if w == &avif_sizes.last().map(|(w, _)| *w).unwrap_or_default() {
+                        format!("{w}px")
+                    } else {
+                        format!("(max-width: {w}px) {w}px")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            println!("Variants generated for {original_path:?}");
+            drop(generation_lock);
+            Some((srcs, sizes_st, (width, height)))
         }
-
-        avif_sizes.sort_by(|a, b| a.0.cmp(&b.0));
-        let srcs = avif_sizes
-            .iter()
-            .map(|(k, v)| {
-                format!(
-                    "{} {k}w",
-                    v.to_string_lossy()
-                        .strip_prefix(options.site_root.as_ref())
-                        .expect("expected path to start in root")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sizes_st = avif_sizes
-            .iter()
-            .map(|(w, _)| {
-                if w == &avif_sizes.last().map(|(w, _)| *w).unwrap_or_default() {
-                    format!("{w}px")
-                } else {
-                    format!("(max-width: {w}px) {w}px")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        println!("Variants generated for {original_path:?}");
-        drop(generation_lock);
-        Some((srcs, sizes_st, (width, height)))
     }
 
+    #[cfg(not(debug_assertions))]
     async fn generate_file_hash(file_path: &Path) -> std::io::Result<String> {
         println!("Generating file hash for {file_path:?}");
         println!("Opening file {file_path:?}");
@@ -282,7 +286,7 @@ pub mod ssr {
         let mut reader = BufReader::new(file);
         let mut hasher = Sha256::new();
 
-        let mut buffer = [0; 1024]; // 1MB buffer
+        let mut buffer = [0; 1024 * 1024]; // 1MB buffer
         loop {
             let count = reader.read(&mut buffer).await?;
             if count == 0 {
