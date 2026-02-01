@@ -52,25 +52,25 @@ pub fn Picture(
 #[cfg(feature = "ssr")]
 pub mod ssr {
 
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(unused_imports))]
     use std::{
         collections::{HashMap, HashSet},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
 
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(unused_imports))]
     use image::{ImageReader, imageops::FilterType};
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(unused_imports))]
     use leptos::{config::LeptosOptions, prelude::expect_context};
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(unused_imports))]
     use rayon::prelude::*;
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(unused_imports))]
     use sha2::{Digest, Sha256};
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(unused_imports))]
     use tokio::io::{AsyncReadExt, BufReader};
 
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(dead_code))]
     #[derive(Clone)]
     pub struct VariantLock {
         paths: Arc<Mutex<HashMap<PathBuf, (u32, u32, HashSet<(u32, PathBuf)>)>>>,
@@ -78,7 +78,7 @@ pub mod ssr {
         pub cache_folder_path: PathBuf,
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(dead_code))]
     impl VariantLock {
         pub fn new(cache_folder: PathBuf) -> VariantLock {
             Self {
@@ -269,7 +269,7 @@ pub mod ssr {
         }
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg_attr(debug_assertions, allow(dead_code))]
     async fn generate_file_hash(file_path: &Path) -> std::io::Result<String> {
         println!("Generating file hash for {file_path:?}");
         println!("Opening file {file_path:?}");
