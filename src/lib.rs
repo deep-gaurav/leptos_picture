@@ -286,7 +286,7 @@ pub mod ssr {
         let mut reader = BufReader::new(file);
         let mut hasher = Sha256::new();
 
-        let mut buffer = [0; 1024 * 1024]; // 1MB buffer
+        let mut buffer = vec![0u8; 1024 * 1024]; // 1MB heap buffer
         loop {
             let count = reader.read(&mut buffer).await?;
             if count == 0 {
