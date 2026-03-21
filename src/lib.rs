@@ -175,7 +175,6 @@ pub mod ssr {
 
             let mut width = 0;
             let mut height = 0;
-            let mut needed_gen = true;
             {
                 if let Ok(mut variants) = variantlock.paths.lock() {
                     if let Some((image_width, image_height, variants_gen)) =
@@ -186,110 +185,108 @@ pub mod ssr {
                         for (size, path) in variants_gen.iter() {
                             avif_sizes.push((*size, path.clone()));
                         }
-                        needed_gen = false;
                     }
                 }
             }
-            if needed_gen {
-                let image_hash_result = generate_file_hash(&path).await;
 
-                let img_hash = match image_hash_result {
-                    Ok(hash) => hash,
-                    Err(err) => {
-                        println!("Error generating file hash: {err}");
-                        return None;
-                    }
-                };
-                println!("Got hash {img_hash}");
-                let cache_dir = variantlock
-                    .cache_folder_path
-                    .join(format!("{name}-{img_hash}"));
-                tokio::fs::create_dir_all(&cache_dir).await.ok()?;
+            let image_hash_result = generate_file_hash(&path).await;
 
-                let path = path.clone();
-                let dir = dir.to_path_buf();
-                let name = name.to_string();
-                let paths = variantlock.paths.clone();
-                let original_path = original_path.clone();
-                let cache_dir = cache_dir.clone();
+            let img_hash = match image_hash_result {
+                Ok(hash) => hash,
+                Err(err) => {
+                    println!("Error generating file hash: {err}");
+                    return None;
+                }
+            };
+            println!("Got hash {img_hash}");
+            let cache_dir = variantlock
+                .cache_folder_path
+                .join(format!("{name}-{img_hash}"));
+            tokio::fs::create_dir_all(&cache_dir).await.ok()?;
 
-                let (w, h, generated) = tokio::task::spawn_blocking(move || {
-                    let image = ImageReader::open(&path).ok()?.decode().ok()?;
-                    let width = image.width();
-                    let height = image.height();
-                    let mut sizes = sizes.clone();
-                    sizes.retain(|size| size < &width);
+            let path = path.clone();
+            let dir = dir.to_path_buf();
+            let name = name.to_string();
+            let paths = variantlock.paths.clone();
+            let original_path = original_path.clone();
+            let cache_dir = cache_dir.clone();
 
-                    if width > sizes.last().cloned().unwrap_or_default() {
-                        sizes.push(width);
-                    }
+            let (w, h, generated) = tokio::task::spawn_blocking(move || {
+                let image = ImageReader::open(&path).ok()?.decode().ok()?;
+                let width = image.width();
+                let height = image.height();
+                let mut sizes = sizes.clone();
+                sizes.retain(|size| size < &width);
 
-                    let image = Arc::new(image);
+                if width > sizes.last().cloned().unwrap_or_default() {
+                    sizes.push(width);
+                }
 
-                    let generated = sizes
-                        .par_iter()
-                        .filter_map(|size| {
-                            let name = format!("{name}-{size}.avif");
-                            let path = dir.join(&name);
-                            let cache_path = cache_dir.join(&name);
+                let image = Arc::new(image);
 
-                            {
-                                if let Ok(mut variants) = paths.lock() {
-                                    if let Some((_, _, variants_gen)) =
-                                        variants.get_mut(&original_path)
-                                    {
-                                        if variants_gen.contains(&(*size, path.clone())) {
-                                            return Some((*size, path.clone()));
-                                        } else {
-                                            variants_gen.insert((*size, path.clone()));
-                                        }
+                let generated = sizes
+                    .par_iter()
+                    .filter_map(|size| {
+                        let name = format!("{name}-{size}.avif");
+                        let path = dir.join(&name);
+                        let cache_path = cache_dir.join(&name);
+
+                        {
+                            if let Ok(mut variants) = paths.lock() {
+                                if let Some((_, _, variants_gen)) =
+                                    variants.get_mut(&original_path)
+                                {
+                                    if variants_gen.contains(&(*size, path.clone())) {
+                                        return Some((*size, path.clone()));
                                     } else {
-                                        let mut variants_gen = HashSet::new();
                                         variants_gen.insert((*size, path.clone()));
-                                        variants.insert(
-                                            original_path.clone(),
-                                            (width, height, variants_gen),
-                                        );
                                     }
                                 } else {
-                                    return None;
+                                    let mut variants_gen = HashSet::new();
+                                    variants_gen.insert((*size, path.clone()));
+                                    variants.insert(
+                                        original_path.clone(),
+                                        (width, height, variants_gen),
+                                    );
                                 }
+                            } else {
+                                return None;
                             }
+                        }
 
-                            if cache_path.exists() && std::fs::copy(&cache_path, &path).is_ok() {
-                                return Some((*size, path));
-                            }
+                        if cache_path.exists() && std::fs::copy(&cache_path, &path).is_ok() {
+                            return Some((*size, path));
+                        }
 
-                            let new_h = ((*size as f64) / (width as f64)) * (height as f64);
-                            let filter = FilterType::Lanczos3;
-                            let new_img = image.resize_exact(*size, new_h as u32, filter);
+                        let new_h = ((*size as f64) / (width as f64)) * (height as f64);
+                        let filter = FilterType::Lanczos3;
+                        let new_img = image.resize_exact(*size, new_h as u32, filter);
 
-                            if path.exists() {
-                                println!("Skip bcz exists {path:?}");
+                        if path.exists() {
+                            println!("Skip bcz exists {path:?}");
+                            Some((*size, path))
+                        } else {
+                            let q = if *size < min_quality_threshold { small_image_quality } else { quality };
+                            println!("writing to New w: {size} h {new_h} q:{q} {path:?}");
+                            if save_avif(&new_img, &path, q).is_ok() {
+                                println!("written to New w: {size} h {new_h} {path:?}");
+                                let _ = std::fs::copy(&path, &cache_path);
                                 Some((*size, path))
                             } else {
-                                let q = if *size < min_quality_threshold { small_image_quality } else { quality };
-                                println!("writing to New w: {size} h {new_h} q:{q} {path:?}");
-                                if save_avif(&new_img, &path, q).is_ok() {
-                                    println!("written to New w: {size} h {new_h} {path:?}");
-                                    let _ = std::fs::copy(&path, &cache_path);
-                                    Some((*size, path))
-                                } else {
-                                    None
-                                }
+                                None
                             }
-                        })
-                        .collect::<Vec<_>>();
+                        }
+                    })
+                    .collect::<Vec<_>>();
 
-                    Some((width, height, generated))
-                })
-                .await
-                .ok()??;
+                Some((width, height, generated))
+            })
+            .await
+            .ok()??;
 
-                width = w;
-                height = h;
-                avif_sizes.extend(generated);
-            }
+            width = w;
+            height = h;
+            avif_sizes.extend(generated);
 
             avif_sizes.sort_by(|a, b| a.0.cmp(&b.0));
             let srcs = avif_sizes
