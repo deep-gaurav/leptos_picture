@@ -1,5 +1,13 @@
 use leptos::{prelude::*, text_prop::TextProp};
 
+#[derive(Clone, PartialEq, Default)]
+pub struct PictureConfig {
+    pub sizes: Option<Vec<u32>>,
+    pub quality: Option<u8>,
+    pub min_quality_threshold: Option<u32>,
+    pub small_image_quality: Option<u8>,
+}
+
 #[component]
 pub fn Picture(
     #[prop(into)] src: TextProp,
@@ -12,7 +20,7 @@ pub fn Picture(
 ) -> impl IntoView {
     let src = src.get().as_str().to_string();
     let srcc = src.clone();
-    let config = ssr::PictureConfig {
+    let config = PictureConfig {
         sizes: variant_sizes,
         quality,
         min_quality_threshold,
@@ -21,7 +29,7 @@ pub fn Picture(
     let configc = config.clone();
     let srcset = Resource::new_blocking(
         move || (srcc.clone(), configc.clone()),
-        |(src_in, cfg)| async move {
+        |(src_in, cfg): (String, PictureConfig)| async move {
             #[cfg(feature = "ssr")]
             {
                 ssr::make_variants(&src_in, cfg).await
@@ -29,6 +37,7 @@ pub fn Picture(
             #[cfg(not(feature = "ssr"))]
             {
                 let _ = cfg;
+                let _ = src_in;
                 Option::<(String, String, (u32, u32))>::None
             }
         },
@@ -129,27 +138,7 @@ pub mod ssr {
         }
     }
 
-    #[cfg_attr(debug_assertions, allow(dead_code))]
-    #[derive(Clone, PartialEq)]
-    pub struct PictureConfig {
-        pub sizes: Option<Vec<u32>>,
-        pub quality: Option<u8>,
-        pub min_quality_threshold: Option<u32>,
-        pub small_image_quality: Option<u8>,
-    }
-
-    impl Default for PictureConfig {
-        fn default() -> Self {
-            Self {
-                sizes: None,
-                quality: None,
-                min_quality_threshold: None,
-                small_image_quality: None,
-            }
-        }
-    }
-
-    pub async fn make_variants(url: &str, config: PictureConfig) -> Option<(String, String, (u32, u32))> {
+    pub async fn make_variants(url: &str, config: super::PictureConfig) -> Option<(String, String, (u32, u32))> {
         #[cfg(debug_assertions)]
         {
             let _ = url;
