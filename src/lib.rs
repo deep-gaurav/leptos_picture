@@ -211,12 +211,25 @@ pub mod ssr {
             let original_path_for_closure = original_path.clone();
             let cache_dir = cache_dir.clone();
 
-            let (w, h, generated) = tokio::task::spawn_blocking(move || {
-                let image = ImageReader::open(&path).ok()?.decode().ok()?;
+            let (w, h, generated) = match tokio::task::spawn_blocking(move || {
+                let image = match ImageReader::open(&path).ok() {
+                    Some(img) => img,
+                    None => {
+                        eprintln!("Failed to open image: {:?}", path);
+                        return None;
+                    }
+                };
+                let image = match image.decode() {
+                    Ok(img) => img,
+                    None => {
+                        eprintln!("Failed to decode image: {:?}", path);
+                        return None;
+                    }
+                };
                 let width = image.width();
                 let height = image.height();
                 let mut sizes = sizes.clone();
-                sizes.retain(|size| size < &width);
+                sizes.retain(|size| *size < width);
 
                 if width > sizes.last().cloned().unwrap_or_default() {
                     sizes.push(width);
@@ -224,7 +237,7 @@ pub mod ssr {
 
                 let image = Arc::new(image);
 
-                let generated = sizes
+                let generated: Vec<(u32, PathBuf)> = sizes
                     .par_iter()
                     .filter_map(|size| {
                         let name = format!("{name}-{size}.avif");
@@ -250,11 +263,13 @@ pub mod ssr {
                                     );
                                 }
                             } else {
+                                eprintln!("Failed to acquire paths lock");
                                 return None;
                             }
                         }
 
                         if cache_path.exists() && std::fs::copy(&cache_path, &path).is_ok() {
+                            println!("Cache hit for {size}: {:?}", path);
                             return Some((*size, path));
                         }
 
@@ -263,30 +278,43 @@ pub mod ssr {
                         let new_img = image.resize_exact(*size, new_h as u32, filter);
 
                         if path.exists() {
-                            println!("Skip bcz exists {path:?}");
+                            println!("File exists (no cache): {:?}", path);
                             Some((*size, path))
                         } else {
                             let q = if *size < min_quality_threshold { small_image_quality } else { quality };
-                            println!("writing to New w: {size} h {new_h} q:{q} {path:?}");
-                            if save_avif(&new_img, &path, q).is_ok() {
-                                println!("written to New w: {size} h {new_h} {path:?}");
-                                let _ = std::fs::copy(&path, &cache_path);
-                                Some((*size, path))
-                            } else {
-                                None
+                            println!("Generating {size}w (quality {q}): {:?}", path);
+                            match save_avif(&new_img, &path, q) {
+                                Ok(_) => {
+                                    println!("Generated successfully: {:?}", path);
+                                    let _ = std::fs::copy(&path, &cache_path);
+                                    Some((*size, path))
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to save avif: {:?} - {}", path, e);
+                                    None
+                                }
                             }
                         }
                     })
-                    .collect::<Vec<_>>();
+                    .collect();
 
+                println!("Generated {} variants for {:?}", generated.len(), original_path_for_closure);
                 Some((width, height, generated))
             })
             .await
-            .ok()??;
-
-            width = w;
-            height = h;
-            avif_sizes.extend(generated);
+            {
+                Ok(Some((w, h, generated))) => {
+                    width = w;
+                    height = h;
+                    avif_sizes.extend(generated);
+                }
+                Ok(None) => {
+                    eprintln!("spawn_blocking returned None for {:?}", original_path);
+                }
+                Err(e) => {
+                    eprintln!("spawn_blocking panicked or errored for {:?}: {}", original_path, e);
+                }
+            };
 
             avif_sizes.sort_by(|a, b| a.0.cmp(&b.0));
             let srcs = avif_sizes
