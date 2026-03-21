@@ -6,10 +6,12 @@ edition = "2024"
 [dependencies]
 leptos = "0.8"
 tokio = { version = "1", features = ["io-util", "fs", "rt","sync"], optional = true }
-image = { version = "0.25", optional = true }
+image = { version = "0.25", default-features = false, features = ["avif", "rayon"], optional = true }
 sha2 = { version = "0.10.8", optional = true }
 hex = { version = "0.4.3", optional = true }
 rayon = { version = "1.10", optional = true }
 
 [features]
-ssr = [ "tokio", "image", "sha2", "hex", "rayon" ]
+default = []
+ssr = ["tokio", "image", "sha2", "hex", "rayon"]
+nasm = ["image/nasm"]
