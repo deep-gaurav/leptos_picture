@@ -208,7 +208,7 @@ pub mod ssr {
             let dir = dir.to_path_buf();
             let name = name.to_string();
             let paths = variantlock.paths.clone();
-            let original_path = original_path.clone();
+            let original_path_for_closure = original_path.clone();
             let cache_dir = cache_dir.clone();
 
             let (w, h, generated) = tokio::task::spawn_blocking(move || {
@@ -234,7 +234,7 @@ pub mod ssr {
                         {
                             if let Ok(mut variants) = paths.lock() {
                                 if let Some((_, _, variants_gen)) =
-                                    variants.get_mut(&original_path)
+                                    variants.get_mut(&original_path_for_closure)
                                 {
                                     if variants_gen.contains(&(*size, path.clone())) {
                                         return Some((*size, path.clone()));
@@ -245,7 +245,7 @@ pub mod ssr {
                                     let mut variants_gen = HashSet::new();
                                     variants_gen.insert((*size, path.clone()));
                                     variants.insert(
-                                        original_path.clone(),
+                                        original_path_for_closure.clone(),
                                         (width, height, variants_gen),
                                     );
                                 }
