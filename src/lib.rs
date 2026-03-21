@@ -221,8 +221,8 @@ pub mod ssr {
                 };
                 let image = match image.decode() {
                     Ok(img) => img,
-                    None => {
-                        eprintln!("Failed to decode image: {:?}", path);
+                    Err(e) => {
+                        eprintln!("Failed to decode image: {:?} - {}", path, e);
                         return None;
                     }
                 };
