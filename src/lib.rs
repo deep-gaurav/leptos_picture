@@ -211,21 +211,17 @@ pub mod ssr {
             let original_path_for_closure = original_path.clone();
             let cache_dir = cache_dir.clone();
 
-            let (w, h, generated) = match tokio::task::spawn_blocking(move || {
-                let image = match ImageReader::open(&path).ok() {
+            let blocking_result = tokio::task::spawn_blocking(move || {
+                let image = ImageReader::open(&path)
+                    .map_err(|e| eprintln!("Failed to open image: {:?} - {}", path, e))
+                    .ok()
+                    .and_then(|img| img.decode().map_err(|e| eprintln!("Failed to decode image: {:?} - {}", path, e)).ok());
+                
+                let image = match image {
                     Some(img) => img,
-                    None => {
-                        eprintln!("Failed to open image: {:?}", path);
-                        return None;
-                    }
+                    None => return None,
                 };
-                let image = match image.decode() {
-                    Ok(img) => img,
-                    Err(e) => {
-                        eprintln!("Failed to decode image: {:?} - {}", path, e);
-                        return None;
-                    }
-                };
+                
                 let width = image.width();
                 let height = image.height();
                 let mut sizes = sizes.clone();
@@ -301,8 +297,9 @@ pub mod ssr {
                 println!("Generated {} variants for {:?}", generated.len(), original_path_for_closure);
                 Some((width, height, generated))
             })
-            .await
-            {
+            .await;
+
+            match blocking_result {
                 Ok(Some((w, h, generated))) => {
                     width = w;
                     height = h;
@@ -314,7 +311,7 @@ pub mod ssr {
                 Err(e) => {
                     eprintln!("spawn_blocking panicked or errored for {:?}: {}", original_path, e);
                 }
-            };
+            }
 
             avif_sizes.sort_by(|a, b| a.0.cmp(&b.0));
             let srcs = avif_sizes
